@@ -1,0 +1,194 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract CharityDonation {
+    address public owner;
+    address[] public charities;
+    mapping(address => uint256) public balances;
+    mapping(address => uint256) public donations;
+    mapping(address => mapping(address => uint256)) public individualDonations;
+    mapping(address => address[]) private donors;
+    mapping(address => mapping(address => uint256)) public doneeDistributions;
+    mapping(address => address[]) private doneesByCharity;
+    mapping(address => address[]) private doneesByDonor;
+    mapping(address => mapping(address => uint256)) public donorToDoneeDistribution;
+
+    mapping(address => uint256) public fundingGoals;
+    mapping(address => uint256) public fundingProgress;
+
+    event DonationReceived(address indexed donor, uint256 amount, address indexed charity);
+    event FundsWithdrawn(address indexed charity, uint256 amount);
+    event FundsDistributed(address indexed charity, address indexed donee, uint256 amount);
+    event FundingGoalSet(address indexed charity, uint256 goal);
+    event FundingGoalReached(address indexed charity, uint256 goal);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only the owner can perform this action");
+        _;
+    }
+
+    modifier onlyCharity() {
+        require(isCharity(msg.sender), "Only authorized charities can perform this action");
+        _;
+    }
+
+    constructor(address[] memory _charities) {
+        owner = msg.sender;
+        charities = _charities;
+    }
+
+    function isCharity(address _address) public view returns (bool) {
+        for (uint256 i = 0; i < charities.length; i++) {
+            if (charities[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function donate(address[] memory charityAddresses, uint256[] memory amounts) external payable {
+        require(charityAddresses.length == amounts.length, "Mismatched arrays length");
+
+        uint256 totalAmount = 0;
+        for (uint256 i = 0; i < charityAddresses.length; i++) {
+            address charity = charityAddresses[i];
+            uint256 amount = amounts[i] * 1 ether;
+
+            require(isCharity(charity), "Invalid charity address");
+            require(amount > 0, "Donation amount must be greater than zero");
+
+            totalAmount += amount;
+
+            balances[msg.sender] += amount;
+            donations[charity] += amount;
+            individualDonations[charity][msg.sender] += amount;
+            fundingProgress[charity] += amount;
+
+            // Add donor to the list if not already present
+            if (individualDonations[charity][msg.sender] == amount) {
+                donors[charity].push(msg.sender);
+            }
+
+            emit DonationReceived(msg.sender, amount, charity);
+
+            if (fundingProgress[charity] >= fundingGoals[charity] && fundingGoals[charity] > 0) {
+                emit FundingGoalReached(charity, fundingGoals[charity]);
+            }
+        }
+
+        require(msg.value == totalAmount, "Incorrect total donation amount");
+    }
+
+    function distributeToDonee(address[] memory donees, uint256[] memory amounts) external payable onlyCharity {
+        require(donees.length == amounts.length, "Mismatched arrays length");
+
+        uint256 totalAmount = 0;
+        for (uint256 i = 0; i < donees.length; i++) {
+            address donee = donees[i];
+            uint256 amountInWei = amounts[i] * 1 ether;
+            totalAmount += amountInWei;
+        }
+
+        require(msg.value == totalAmount, "Incorrect total donation amount");
+
+        for (uint256 i = 0; i < donees.length; i++) {
+            address donee = donees[i];
+            uint256 amountInWei = amounts[i] * 1 ether;
+
+            donations[msg.sender] -= amountInWei;
+            doneeDistributions[msg.sender][donee] += amountInWei;
+            doneesByCharity[msg.sender].push(donee);
+
+            // Distribute from each donor proportionally
+            for (uint256 j = 0; j < donors[msg.sender].length; j++) {
+                address donor = donors[msg.sender][j];
+                uint256 donorDonation = individualDonations[msg.sender][donor];
+                uint256 donorShare = (donorDonation * amountInWei) / donations[msg.sender];
+                donorToDoneeDistribution[donor][donee] += donorShare;
+                doneesByDonor[donor].push(donee);
+            }
+
+            payable(donee).transfer(amountInWei);
+            emit FundsDistributed(msg.sender, donee, amountInWei);
+        }
+    }
+
+    function withdrawFunds(uint256 amount) external onlyCharity {
+        uint256 etherAmount = amount * 1 ether;
+        require(donations[msg.sender] >= etherAmount, "Insufficient funds");
+
+        donations[msg.sender] -= etherAmount;
+        payable(msg.sender).transfer(etherAmount);
+
+        emit FundsWithdrawn(msg.sender, etherAmount);
+    }
+
+    function checkFundingProgress(address charity) external view returns (uint256 progress, uint256 goal) {
+        require(isCharity(charity), "Invalid charity address");
+        return (fundingProgress[charity], fundingGoals[charity]);
+    }
+
+    function getCharityBalance(address charity) external view returns (uint256) {
+        return donations[charity];
+    }
+
+    function getIndividualDonation(address charity, address donor) external view returns (uint256) {
+        return individualDonations[charity][donor];
+    }
+
+    function getAllDonors(address charity) external view returns (address[] memory) {
+        return donors[charity];
+    }
+
+    function getDoneesByCharity(address charity) external view returns (address[] memory) {
+        return doneesByCharity[charity];
+    }
+
+    function getDoneesByDonor(address donor) external view returns (address[] memory) {
+        return doneesByDonor[donor];
+    }
+
+    function getDistributionToDonee(address donor, address donee) external view returns (uint256) {
+        return donorToDoneeDistribution[donor][donee];
+    }
+
+    function getTotalDonations(address donor) external view returns (uint256 totalDonations) {
+        for (uint256 i = 0; i < charities.length; i++) {
+            totalDonations += individualDonations[charities[i]][donor];
+        }
+    }
+
+    function addCharity(address newCharity) external onlyOwner {
+        require(!isCharity(newCharity), "Charity already exists");
+        charities.push(newCharity);
+    }
+
+    function removeCharity(address charity) external onlyOwner {
+        require(isCharity(charity), "Charity does not exist");
+        for (uint256 i = 0; i < charities.length; i++) {
+            if (charities[i] == charity) {
+                charities[i] = charities[charities.length - 1];
+                charities.pop();
+                break;
+            }
+        }
+    }
+
+    function setFundingGoal(address charity, uint256 goal) external onlyOwner {
+        require(isCharity(charity), "Invalid charity address");
+        fundingGoals[charity] = goal * 1 ether;
+        fundingProgress[charity] = donations[charity];
+        emit FundingGoalSet(charity, goal);
+    }
+
+    function requestRefund(address charity) external {
+        require(isCharity(charity), "Invalid charity address");
+        uint256 donationAmount = individualDonations[charity][msg.sender];
+        require(donationAmount > 0, "No donations found to refund");
+
+        individualDonations[charity][msg.sender] = 0;
+        donations[charity] -= donationAmount;
+        fundingProgress[charity] -= donationAmount;
+        payable(msg.sender).transfer(donationAmount);
+    }
+}
